@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<meta charset="UTF-8" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nucleus Voice Chat App</title>
+
+<form id="join-form">
+  <input id="my-id" required placeholder="Kullanıcı Adı" pattern="^[a-zA-Z0-9 _-]+$">
+  <button id="join">Giriş Yap</button>
+  <button id="leave" type="button" hidden>Çıkış Yap</button>
+</form>
+
+<div id="users"></div>
+
+<script src="https://cdn.webrtc.ecl.ntt.com/skyway-4.4.0.min.js"></script>
+
+<script type="module">
+  import { getPeerId, joinRoom, leaveRoom, onRoom, sendRoom } from './nucleus.js'
+  import { getLocalAudio, getAudio } from './audio.js'
+  import { replaceChildren, getRandomId } from './utils.js'
+
+  const $joinForm = document.querySelector('#join-form')
+  const $myId = document.querySelector('#my-id')
+  const $join = document.querySelector('#join')
+  const $leave = document.querySelector('#leave')
+  const $users = document.querySelector('#users')
+  const $readme = document.querySelector('#readme')
+
+  const quietVolume = 0.1
+  const userEls = {}
+  const groupEls = {}
+  const userAudios = {}
+
+  let localAudio = null
+  let users = {}
+  let hearId = ''
+
+  function sendUsers() {
+    sendRoom('users', users)
+  }
+
+  function setUsers(data) {
+    users = data
+    renderUsers()
+  }
+
+  function renderUsers() {
+    for (let [uid, gid] of Object.entries(users)) {
+      if (gid && Object.values(users).filter((v) => v === gid).length <= 1) {
+        users[uid] = gid = ''
+      }
+      if (uid === hearId && gid) {
+        hearId = ''
+      }
+      if (uid in userAudios) {
+        const isHear = hearId && (uid === hearId || gid === hearId)
+        const isGroup = users[getPeerId()] && users[uid] === users[getPeerId()]
+        userAudios[uid].setVolume((isHear || isGroup) ? 1 : quietVolume)
+      }
+    }
+
+    const userIds = Object.keys(users).sort((a, b) => a[0] > b[0] ? 1 : -1)
+    const groupIds = Object.values(users).sort((a, b) => a > b ? 1 : -1).filter((v, i, a) => v && a.indexOf(v) === i)
+
+    for (const uid of Object.keys(userEls)) {
+      if (!userIds.includes(uid)) {
+        userEls[uid].remove()
+        delete userEls[uid]
+        userAudios[uid]?.destroy()
+      }
+    }
+
+    for (const uid of userIds) {
+      if (!(uid in userEls)) {
+        userEls[uid] = createUserElement(uid)
+      }
+    }
+
+    for (const [uid, el] of Object.entries(userEls)) {
+      el.classList.toggle('hear', uid === hearId)
+    }
+
+    for (const gid of Object.keys(groupEls)) {
+      if (!groupIds.includes(gid)) {
+        groupEls[gid].remove()
+        delete groupEls[gid]
+      }
+    }
+
+    for (const gid of groupIds) {
+      if (!(gid in groupEls)) {
+        groupEls[gid] = createGroupElement(gid)
+      }
+    }
+
+    for (const [gid, el] of Object.entries(groupEls)) {
+      el.classList.toggle('hear', gid === hearId)
+      el.classList.toggle('current', users[getPeerId()] === gid)
+    }
+
+    const getUserEls = (gid) => userIds.filter((uid) => users[uid] === gid).map((uid) => userEls[uid])
+    replaceChildren($users, [...groupIds.map((gid) => groupEls[gid]), ...getUserEls('')])
+    Object.entries(groupEls).forEach(([gid, el]) => replaceChildren(el, getUserEls(gid)))
+  }
+
+  function createGroupElement(gid) {
+    const el = document.createElement('div')
+    el.className = 'group'
+
+    el.onclick = () => {
+      users[getPeerId()] = users[getPeerId()] === gid ? '' : gid
+      renderUsers()
+      sendUsers()
+    }
+
+    el.onmouseenter = () => {
+      if (gid !== users[getPeerId()]) {
+        hearId = gid
+        renderUsers()
+      }
+    }
+
+    el.onmouseleave = () => {
+      if (hearId === gid) {
+        hearId = ''
+        renderUsers()
+      }
+    }
+
+    return el
+  }
+
+  function createUserElement(uid) {
+    const el = document.createElement('div')
+    el.className = uid === getPeerId() ? 'user current' : 'user'
+    el.textContent = uid
+
+    el.onclick = () => {
+      if (!el.closest('.group') && uid !== getPeerId()) {
+        users[uid] = users[getPeerId()] = getRandomId()
+        renderUsers()
+        sendUsers()
+      }
+    }
+
+    el.onmouseenter = () => {
+      if (!el.closest('.group') && uid !== getPeerId()) {
+        hearId = uid
+        renderUsers()
+      }
+    }
+
+    el.onmouseleave = () => {
+      if (hearId === uid && !el.closest('.group') && uid !== getPeerId()) {
+        hearId = ''
+        renderUsers()
+      }
+    }
+
+    return el
+  }
+
+  $leave.onclick = () => {
+    leaveRoom()
+    setUsers({})
+    localAudio?.destroy()
+    $myId.disabled = false
+    $join.disabled = false
+    $join.hidden = false
+    $leave.hidden = true
+    $readme.hidden = true
+  }
+
+  $joinForm.onsubmit = async (e) => {
+    e.preventDefault()
+
+    $myId.disabled = true
+    $join.disabled = true
+
+    try {
+      localAudio = await getLocalAudio()
+      await joinRoom($myId.value, localAudio.stream)
+      localAudio.onAnalyze((v) => userEls[getPeerId()]?.classList.toggle('speak', v > 0.2))
+    } catch (err) {
+      alert(err)
+      $myId.disabled = false
+      $join.disabled = false
+      return
+    }
+
+    $join.hidden = true
+    $leave.hidden = false
+    $readme.hidden = false
+
+    users[getPeerId()] = ''
+    renderUsers()
+
+    onRoom("peerJoin", (peerId) => {
+      console.log('@@@peerJoin', peerId)
+      users[peerId] = ''
+      renderUsers()
+      sendUsers()
+    })
+
+    onRoom("peerLeave", (peerId) => {
+      console.log('@@@peerLeave', peerId)
+      delete users[peerId]
+      renderUsers()
+    })
+
+    onRoom("stream", async (stream) => {
+      console.log('@@@stream', stream.peerId)
+      userAudios[stream.peerId]?.destroy()
+      const audio = userAudios[stream.peerId] = await getAudio(stream)
+      audio.setVolume(quietVolume)
+      audio.onAnalyze((volume) => userEls[stream.peerId]?.classList.toggle('speak', volume > 0.2))
+    })
+
+    onRoom("data", ({ src: peerId, data: { type, data }}) => {
+      console.log('@@@data', peerId, type, data)
+
+      if (type === 'users') {
+        setUsers(data)
+      }
+    })
+  }
+</script>
+
+<style>
+  #join-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 30px 20px;
+    font-size: 14px;
+  }
+
+  #join-form button,
+  #join-form input {
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 0 12px;
+    height: 2.6em;
+    box-sizing: border-box;
+  }
+
+  #users {
+    margin: 40px 30px;
+    font-size: 16px;
+  }
+
+  #readme {
+    margin: 30px 20px;
+    color: #666;
+    font-size: 12px;
+    line-height: 2;
+  }
+
+  #readme ul {
+    margin-top: 0;
+    padding-left: 20px;
+  }
+
+  .group {
+    margin: 4px 0;
+    border: #ddd 2px solid;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .group.current {
+    border-color: #aaa;
+  }
+
+  .group.hear {
+    background-color: rgba(255, 166, 0, 0.1);
+  }
+
+  .user {
+    margin: 4px;
+    padding: 4px 8px;
+    color: #222;
+    border-radius: 3px;
+  }
+
+  .user::before {
+    content: '\1f464';
+    margin-right: 0.4em;
+    color: transparent;
+    background-color: #222;
+    -webkit-background-clip: text;
+    transition: background-color 0.3s ease-in;
+  }
+
+  .user.speak::before {
+    background-color: greenyellow;
+    transition-duration: 0s;
+  }
+
+  .user.current {
+    font-weight: bold;
+  }
+
+  .user:not(.current) {
+    cursor: pointer;
+  }
+
+  .user.hear {
+    background-color: rgba(255, 166, 0, 0.1);
+  }
+</style>
